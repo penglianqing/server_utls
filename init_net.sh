@@ -105,9 +105,19 @@ detect_nic() {
     return
   fi
 
-  NIC="$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null \
+  NIC="$(ip -o link show 2>/dev/null \
+    | awk -F': ' '{print $2}' \
+    | sed 's/@.*//' \
     | sort \
-    | awk '!/^(lo|docker[0-9]*|br-|veth|virbr|tap|tun)/ { print; exit }')"
+    | awk '!/^(lo|docker[0-9]*|br-|veth|virbr|tap|tun|bonding_masters)$/ { print; exit }')"
+  if [[ -n "${NIC}" ]]; then
+    info "Detected network interface from ip link: ${NIC}"
+    return
+  fi
+
+  NIC="$(find /sys/class/net -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -printf '%f\n' 2>/dev/null \
+    | sort \
+    | awk '!/^(lo|docker[0-9]*|br-|veth|virbr|tap|tun|bonding_masters)$/ { print; exit }')"
   if [[ -n "${NIC}" ]]; then
     info "Detected network interface from /sys/class/net: ${NIC}"
     return
@@ -128,18 +138,33 @@ network_config_file() {
   echo "/etc/systemd/network/00-init-net-${NIC}.network"
 }
 
+boot_apply_service_file() {
+  echo "/etc/systemd/system/init-net-ip.service"
+}
+
 backup_config() {
-  local config_file legacy_config_file timestamp
+  local config_file legacy_config_file service_file timestamp
   config_file="$(network_config_file)"
   legacy_config_file="/etc/systemd/network/${NIC}.network"
+  service_file="$(boot_apply_service_file)"
   timestamp="$(date +%Y%m%d%H%M%S)"
 
-  for file in "${config_file}" "${legacy_config_file}"; do
+  for file in "${config_file}" "${legacy_config_file}" "${service_file}"; do
     if [[ -f "${file}" ]]; then
       cp "${file}" "${file}.bak.${timestamp}"
-      info "Backed up existing network config: ${file}"
+      info "Backed up existing config: ${file}"
     fi
   done
+}
+
+enable_networkd() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    error "systemctl is not available; cannot enable systemd-networkd for boot."
+    exit 1
+  fi
+
+  info "Enabling systemd-networkd for boot..."
+  systemctl enable systemd-networkd
 }
 
 write_config() {
@@ -165,6 +190,36 @@ EOF
     mv "/etc/systemd/network/${NIC}.network" "/etc/systemd/network/${NIC}.network.disabled"
     info "Disabled lower-priority legacy config: /etc/systemd/network/${NIC}.network"
   fi
+}
+
+write_boot_apply_service() {
+  local service_file
+  service_file="$(boot_apply_service_file)"
+
+  info "Writing boot-time IPv4 apply service: ${service_file}"
+  cat >"${service_file}" <<EOF
+[Unit]
+Description=Apply init_net static IPv4 address
+After=network-pre.target systemd-networkd.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/ip link set ${NIC} up
+ExecStart=/usr/sbin/ip -4 addr flush dev ${NIC} scope global
+ExecStart=/usr/sbin/ip addr add ${NEW_IP}/${PREFIX} dev ${NIC}
+ExecStart=/usr/sbin/ip route replace default via ${GATEWAY} dev ${NIC}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+enable_boot_apply_service() {
+  info "Enabling boot-time IPv4 apply service..."
+  systemctl daemon-reload
+  systemctl enable init-net-ip.service
 }
 
 apply_config() {
@@ -202,6 +257,9 @@ main() {
   validate_nic
   backup_config
   write_config
+  enable_networkd
+  write_boot_apply_service
+  enable_boot_apply_service
   apply_config
   show_result
 }
