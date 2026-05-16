@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-NIC="eth0"
+NIC="${NIC:-}"
 PREFIX="24"
 GATEWAY="192.168.1.1"
 DNS1="192.168.1.1"
@@ -17,19 +17,22 @@ Usage:
   $0 [options] <ipv4-address>
 
 Options:
-  -h, --help    Show this help message and exit.
+  -i, --nic IFACE  Network interface to configure.
+  -h, --help       Show this help message and exit.
 
 Environment:
   NEW_IP         IPv4 address to configure when no positional IP is provided.
+  NIC            Network interface to configure. Auto-detected when unset.
 
 Defaults:
-  NIC=${NIC}
+  NIC=${NIC:-auto}
   PREFIX=${PREFIX}
   GATEWAY=${GATEWAY}
   DNS=${DNS1}, ${DNS2}
 
 Examples:
   $0 192.168.1.211
+  $0 --nic ens18 192.168.1.211
   NEW_IP=192.168.1.211 $0
 EOF
 }
@@ -37,6 +40,15 @@ EOF
 parse_args() {
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
+      -i|--nic)
+        if [[ "$#" -lt 2 || "$2" == -* ]]; then
+          error "Missing interface name for $1."
+          usage
+          exit 1
+        fi
+        NIC="$2"
+        shift 2
+        ;;
       -h|--help)
         usage
         exit 0
@@ -82,18 +94,62 @@ validate_ip() {
   done
 }
 
-backup_config() {
-  if [[ -f /etc/systemd/network/${NIC}.network ]]; then
-    cp /etc/systemd/network/${NIC}.network /etc/systemd/network/${NIC}.network.bak.$(date +%Y%m%d%H%M%S)
-    info "Backed up existing network config."
+detect_nic() {
+  if [[ -n "${NIC}" ]]; then
+    return
+  fi
+
+  NIC="$(ip -o -4 route show to default 2>/dev/null | awk '{print $5; exit}')"
+  if [[ -n "${NIC}" ]]; then
+    info "Detected network interface from default route: ${NIC}"
+    return
+  fi
+
+  NIC="$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null \
+    | sort \
+    | awk '!/^(lo|docker[0-9]*|br-|veth|virbr|tap|tun)/ { print; exit }')"
+  if [[ -n "${NIC}" ]]; then
+    info "Detected network interface from /sys/class/net: ${NIC}"
+    return
+  fi
+
+  error "Could not detect network interface. Set NIC=<iface> or pass --nic <iface>."
+  exit 1
+}
+
+validate_nic() {
+  if [[ ! -d "/sys/class/net/${NIC}" ]]; then
+    error "Network interface does not exist: ${NIC}"
+    exit 1
   fi
 }
 
+network_config_file() {
+  echo "/etc/systemd/network/00-init-net-${NIC}.network"
+}
+
+backup_config() {
+  local config_file legacy_config_file timestamp
+  config_file="$(network_config_file)"
+  legacy_config_file="/etc/systemd/network/${NIC}.network"
+  timestamp="$(date +%Y%m%d%H%M%S)"
+
+  for file in "${config_file}" "${legacy_config_file}"; do
+    if [[ -f "${file}" ]]; then
+      cp "${file}" "${file}.bak.${timestamp}"
+      info "Backed up existing network config: ${file}"
+    fi
+  done
+}
+
 write_config() {
+  local config_file
+  config_file="$(network_config_file)"
+
   info "Writing static IP config: ${NEW_IP}/${PREFIX}"
   mkdir -p /etc/systemd/network
 
-  cat >/etc/systemd/network/${NIC}.network <<EOF
+  cat >"${config_file}" <<EOF
 [Match]
 Name=${NIC}
 
@@ -104,6 +160,11 @@ Gateway=${GATEWAY}
 DNS=${DNS1}
 DNS=${DNS2}
 EOF
+
+  if [[ -f /etc/systemd/network/${NIC}.network ]]; then
+    mv "/etc/systemd/network/${NIC}.network" "/etc/systemd/network/${NIC}.network.disabled"
+    info "Disabled lower-priority legacy config: /etc/systemd/network/${NIC}.network"
+  fi
 }
 
 apply_config() {
@@ -137,6 +198,8 @@ main() {
   fi
 
   validate_ip "${NEW_IP}"
+  detect_nic
+  validate_nic
   backup_config
   write_config
   apply_config
