@@ -1,39 +1,79 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
-log() { echo "[INFO] $*"; }
-err() { echo "[ERROR] $*" >&2; }
+info() { echo "==> $*"; }
+error() { echo "ERROR: $*" >&2; }
+
+usage() {
+  cat <<EOF
+Usage:
+  $0 [options]
+
+Options:
+  -h, --help    Show this help message and exit.
+
+Description:
+  Install and configure OpenSSH server for root password login.
+
+The script will:
+  1. Install openssh-server and common utility packages.
+  2. Prompt for a new root password.
+  3. Enable root login and password authentication in sshd_config.
+  4. Fix SSH host key permissions.
+  5. Prepare /run/sshd and restart sshd.
+
+Examples:
+  sudo $0
+  sudo bash $0
+EOF
+}
+
+parse_args() {
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        error "Unknown option: $1"
+        usage
+        exit 1
+        ;;
+    esac
+  done
+}
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    err "请使用 root 运行此脚本。"
+    error "Please run this script as root."
     exit 1
   fi
 }
 
 get_password() {
-  echo -n "[PROMPT] 请输入 root 的新密码: "
-  read -s PASSWORD
-  echo "" 
+  read -r -s -p "Enter the new root password: " PASSWORD
+  echo
   if [[ -z "${PASSWORD}" ]]; then
-    err "密码不能为空！"
+    error "Password is required."
     exit 1
   fi
 }
 
 install_packages() {
-  log "检查并安装 SSH..."
-  apt update && DEBIAN_FRONTEND=noninteractive apt install -y openssh-server
+  info "Installing required packages..."
+  apt update
+  DEBIAN_FRONTEND=noninteractive apt install -y openssh-server
   DEBIAN_FRONTEND=noninteractive apt install -y curl ripgrep htop tree wget
 }
 
 set_root_password() {
-  log "设置 root 用户密码..."
+  info "Setting root password..."
   echo "root:${PASSWORD}" | chpasswd
 }
 
 fix_ssh_host_keys() {
-  log "修正 SSH 密钥文件权限..."
+  info "Fixing SSH host key permissions..."
   if ! compgen -G "/etc/ssh/ssh_host_*_key" >/dev/null; then
     ssh-keygen -A
   fi
@@ -44,17 +84,15 @@ fix_ssh_host_keys() {
 
 configure_sshd() {
   local sshd_config="/etc/ssh/sshd_config"
-  log "配置 SSH 策略..."
+  info "Configuring sshd policy..."
 
-  # 确保配置项存在并正确
   sed -i 's/^[#[:space:]]*PermitRootLogin[[:space:]].*/PermitRootLogin yes/' "${sshd_config}"
   sed -i 's/^[#[:space:]]*PasswordAuthentication[[:space:]].*/PasswordAuthentication yes/' "${sshd_config}"
-  
+
   grep -Eq '^PermitRootLogin[[:space:]]+yes$' "${sshd_config}" || echo 'PermitRootLogin yes' >> "${sshd_config}"
   grep -Eq '^PasswordAuthentication[[:space:]]+yes$' "${sshd_config}" || echo 'PasswordAuthentication yes' >> "${sshd_config}"
 
-  # 预创建权限分离目录（解决你遇到的错误）
-  if [ ! -d /run/sshd ]; then
+  if [[ ! -d /run/sshd ]]; then
     mkdir -p /run/sshd
   fi
   chmod 755 /run/sshd
@@ -63,9 +101,8 @@ configure_sshd() {
 }
 
 start_ssh_service() {
-  log "启动服务..."
-  
-  # 兼容 systemd 和直接启动
+  info "Starting SSH service..."
+
   if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q ssh.service; then
     systemctl restart ssh || /usr/sbin/sshd
   else
@@ -75,7 +112,7 @@ start_ssh_service() {
 }
 
 prepare_sshd_runtime() {
-  log "准备 /run/sshd ..."
+  info "Preparing /run/sshd..."
   mkdir -p /run/sshd
   chmod 755 /run/sshd
 
@@ -87,6 +124,7 @@ prepare_sshd_runtime() {
 }
 
 main() {
+  parse_args "$@"
   require_root
   get_password
   install_packages
@@ -95,8 +133,19 @@ main() {
   configure_sshd
   prepare_sshd_runtime
   start_ssh_service
-  log "全部完成！请通过 ssh root@<容器IP> 尝试登录。"
-  log "如果报错 REMOTE HOST IDENTIFICATION HAS CHANGED, 执行 ssh-keygen -R <容器IP>。"
+  echo
+  echo "Done."
+  echo
+  echo "Next steps"
+  echo "============================================================"
+  echo
+  echo "1. Test root SSH login:"
+  echo
+  echo "   ssh root@<server-ip>"
+  echo
+  echo "2. If SSH reports REMOTE HOST IDENTIFICATION HAS CHANGED, run:"
+  echo
+  echo "   ssh-keygen -R <server-ip>"
 }
 
-main
+main "$@"

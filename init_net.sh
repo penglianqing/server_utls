@@ -1,32 +1,67 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-# 用法:
-#   ./init_net.sh 192.168.1.211
+set -Eeuo pipefail
 
 NIC="eth0"
 PREFIX="24"
 GATEWAY="192.168.1.1"
 DNS1="192.168.1.1"
 DNS2="8.8.8.8"
-NEW_IP="${NEW_IP:-${1:-}}"
+NEW_IP="${NEW_IP:-}"
 
-log() { echo "[INFO] $*"; }
-err() { echo "[ERROR] $*" >&2; }
+info() { echo "==> $*"; }
+error() { echo "ERROR: $*" >&2; }
 
 usage() {
   cat <<EOF
-用法:
-  $0 <IPv4地址>
-示例:
+Usage:
+  $0 [options] <ipv4-address>
+
+Options:
+  -h, --help    Show this help message and exit.
+
+Environment:
+  NEW_IP         IPv4 address to configure when no positional IP is provided.
+
+Defaults:
+  NIC=${NIC}
+  PREFIX=${PREFIX}
+  GATEWAY=${GATEWAY}
+  DNS=${DNS1}, ${DNS2}
+
+Examples:
   $0 192.168.1.211
   NEW_IP=192.168.1.211 $0
 EOF
 }
 
+parse_args() {
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      -*)
+        error "Unknown option: $1"
+        usage
+        exit 1
+        ;;
+      *)
+        if [[ -n "$NEW_IP" ]]; then
+          error "Only one IPv4 address can be provided."
+          usage
+          exit 1
+        fi
+        NEW_IP="$1"
+        shift
+        ;;
+    esac
+  done
+}
+
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    err "请用 root 运行。"
+    error "Please run this script as root."
     exit 1
   fi
 }
@@ -34,14 +69,14 @@ require_root() {
 validate_ip() {
   local ip="$1"
   if [[ ! "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    err "IP 格式不正确: $ip"
+    error "Invalid IPv4 address: $ip"
     exit 1
   fi
 
   IFS='.' read -r o1 o2 o3 o4 <<<"$ip"
   for o in "$o1" "$o2" "$o3" "$o4"; do
     if (( o < 0 || o > 255 )); then
-      err "IP 段超出范围: $ip"
+      error "IPv4 octet out of range: $ip"
       exit 1
     fi
   done
@@ -50,12 +85,12 @@ validate_ip() {
 backup_config() {
   if [[ -f /etc/systemd/network/${NIC}.network ]]; then
     cp /etc/systemd/network/${NIC}.network /etc/systemd/network/${NIC}.network.bak.$(date +%Y%m%d%H%M%S)
-    log "已备份原配置。"
+    info "Backed up existing network config."
   fi
 }
 
 write_config() {
-  log "写入静态 IP 配置: ${NEW_IP}/${PREFIX}"
+  info "Writing static IP config: ${NEW_IP}/${PREFIX}"
   mkdir -p /etc/systemd/network
 
   cat >/etc/systemd/network/${NIC}.network <<EOF
@@ -72,29 +107,31 @@ EOF
 }
 
 apply_config() {
-  log "重启 systemd-networkd ..."
+  info "Restarting systemd-networkd..."
   systemctl restart systemd-networkd
 
-  log "清理旧 DHCP 地址 ..."
+  info "Flushing old IPv4 addresses..."
   ip -4 addr flush dev "${NIC}" scope global
   ip addr add "${NEW_IP}/${PREFIX}" dev "${NIC}"
   ip route replace default via "${GATEWAY}" dev "${NIC}"
 
-  log "再次重启 systemd-networkd ..."
+  info "Restarting systemd-networkd again..."
   systemctl restart systemd-networkd
 }
 
 show_result() {
-  log "当前地址："
+  info "Current addresses:"
   ip -br addr show dev "${NIC}" || true
-  log "当前路由："
+  info "Current routes:"
   ip route || true
 }
 
 main() {
+  parse_args "$@"
   require_root
 
   if [[ -z "${NEW_IP}" ]]; then
+    error "IPv4 address is required."
     usage
     exit 1
   fi

@@ -1,14 +1,48 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
-log() { echo "[INFO] $*"; }
-err() { echo "[ERROR] $*" >&2; }
+info() { echo "==> $*"; }
+error() { echo "ERROR: $*" >&2; }
 
 SERVICE_USER="${SUDO_USER:-$USER}"
 
+usage() {
+  cat <<EOF
+Usage:
+  $0 [options]
+
+Options:
+  -h, --help    Show this help message and exit.
+
+Description:
+  Install code-server, configure password authentication, and enable the
+  systemd service for the current sudo user.
+
+Examples:
+  sudo $0
+  sudo bash $0
+EOF
+}
+
+parse_args() {
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        error "Unknown option: $1"
+        usage
+        exit 1
+        ;;
+    esac
+  done
+}
+
 require_sudo() {
   if ! command -v sudo >/dev/null 2>&1; then
-    err "未找到 sudo。"
+    error "sudo is required."
     exit 1
   fi
 }
@@ -16,18 +50,18 @@ require_sudo() {
 prompt_password() {
   local p1 p2
   while true; do
-    read -r -s -p "请输入 code-server 密码: " p1
+    read -r -s -p "Enter the code-server password: " p1
     echo
-    read -r -s -p "请再次输入 code-server 密码: " p2
+    read -r -s -p "Confirm the code-server password: " p2
     echo
 
     if [[ -z "$p1" ]]; then
-      err "密码不能为空。"
+      error "Password is required."
       continue
     fi
 
     if [[ "$p1" != "$p2" ]]; then
-      err "两次输入不一致，请重试。"
+      error "Passwords do not match. Try again."
       continue
     fi
 
@@ -37,7 +71,7 @@ prompt_password() {
 }
 
 install_code_server() {
-  log "安装 code-server ..."
+  info "Installing code-server..."
   tmp_script="$(mktemp)"
   wget -O "$tmp_script" https://code-server.dev/install.sh
   chmod +x "$tmp_script"
@@ -50,14 +84,14 @@ write_config() {
   user_home="$(getent passwd "$SERVICE_USER" | cut -d: -f6)"
 
   if [[ -z "${user_home}" ]]; then
-    err "无法找到用户 ${SERVICE_USER} 的 home 目录。"
+    error "Could not find the home directory for ${SERVICE_USER}."
     exit 1
   fi
 
   local config_dir="${user_home}/.config/code-server"
   local config_file="${config_dir}/config.yaml"
 
-  log "写入配置: ${config_file}"
+  info "Writing config: ${config_file}"
   mkdir -p "$config_dir"
 
   cat >"$config_file" <<EOF
@@ -72,7 +106,7 @@ EOF
 }
 
 enable_service() {
-  log "启用并启动 code-server@${SERVICE_USER}"
+  info "Enabling and starting code-server@${SERVICE_USER}..."
   systemctl enable --now "code-server@${SERVICE_USER}"
 }
 
@@ -82,24 +116,25 @@ show_result() {
 
   cat <<EOF
 
-完成。
+Done.
 
-运行用户:
+Service user:
   ${SERVICE_USER}
 
-配置文件:
+Config file:
   ${user_home}/.config/code-server/config.yaml
 
-访问地址:
-  http://<你的IP>:8080
+Access URL:
+  http://<server-ip>:8080
 
-查看状态:
+Check status:
   systemctl status code-server@${SERVICE_USER}
 
 EOF
 }
 
 main() {
+  parse_args "$@"
   require_sudo
   prompt_password
   install_code_server
