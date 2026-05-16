@@ -101,14 +101,39 @@ configure_sshd() {
 }
 
 start_ssh_service() {
+  local unit output
   info "Starting SSH service..."
 
-  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q ssh.service; then
-    systemctl restart ssh || /usr/sbin/sshd
-  else
-    pkill -x sshd >/dev/null 2>&1 || true
-    /usr/sbin/sshd
+  /usr/sbin/sshd -t
+
+  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files >/dev/null 2>&1; then
+    for unit in ssh.service sshd.service; do
+      if systemctl cat "${unit}" >/dev/null 2>&1; then
+        systemctl enable "${unit}" >/dev/null 2>&1 || true
+        if output=$(systemctl reload-or-restart "${unit}" 2>&1); then
+          return
+        fi
+
+        error "Failed to start ${unit}:"
+        echo "${output}" >&2
+        systemctl status "${unit}" --no-pager -l >&2 || true
+        journalctl -xeu "${unit}" --no-pager -n 40 >&2 || true
+
+        if pgrep -x sshd >/dev/null 2>&1; then
+          info "sshd is already running; leaving the existing daemon in place."
+          return
+        fi
+        exit 1
+      fi
+    done
   fi
+
+  if pgrep -x sshd >/dev/null 2>&1; then
+    info "sshd is already running."
+    return
+  fi
+
+  /usr/sbin/sshd
 }
 
 prepare_sshd_runtime() {
